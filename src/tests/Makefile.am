@@ -36,6 +36,10 @@ if WANT_UDPSTREAM_TEST
 SUBDIRS+=udpstream
 endif
 
+if WANT_SRV6_TEST
+SUBDIRS+=srv6
+endif
+
 # Always include the currently disabled youtube test, so that the python
 # scripts get built and included.
 # TODO: what is the best way to always build the server-side python scripts

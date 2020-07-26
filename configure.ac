@@ -367,6 +367,20 @@ AC_ARG_ENABLE(youtube,
     esac],
     [want_youtube_test=false])
 
+AC_ARG_ENABLE(srv6,
+    AC_HELP_STRING([--enable-srv6],
+        [Enable the srv6 test (default: yes)]),
+        [case "${enableval}" in
+        true) ;&
+        yes) want_srv6_test=true ;;
+        false) ;&
+        no)	 want_srv6_test=false ;;
+        *) AC_MSG_ERROR(bad value ${enableval} for --enable-srv6) ;;
+        esac],
+        [want_srv6_test=true])
+# using AM_CONDITIONAL propagates this value through to all Makefile.am files
+AM_CONDITIONAL(WANT_SRV6_TEST, [test x"$want_srv6_test" = xtrue])
+
 AC_ARG_WITH(chromium-build,
     AC_HELP_STRING([--with-chromium-build=DIR],
         [Specify the base location of the built chromium libraries]),
@@ -491,7 +505,9 @@ AC_CONFIG_FILES([Makefile
                  src/tests/external/Makefile
                  src/tests/external/test/Makefile
                  src/tests/sip/Makefile
-                 src/tests/sip/test/Makefile])
+                 src/tests/sip/test/Makefile
+                 src/tests/srv6/Makefile
+                 src/tests/srv6/test/Makefile])
                  #src/tests/youtube/test/Makefile
 AC_OUTPUT
 
@@ -518,3 +534,4 @@ reportopt "Compiled with youtube test support" $want_youtube_test
 reportopt "Compiled with fastping test support" $want_fastping_test
 reportopt "Compiled with external test support" $want_external_test
 reportopt "Compiled with sip test support" $want_sip_test
+reportopt "Compiled with srv6 test support" $want_srv6_test
