@@ -94,7 +94,7 @@ struct opt_t {
  * that is sent, and when the response is received.
  */
 struct info_t {
-    struct addrinfo *addr;	/* address probe was sent to */
+    struct in6_addr *addr;	/* address list probe was sent to */
     struct timeval time_sent;	/* when the probe was sent */
     uint32_t delay;		/* delay in receiving response, microseconds */
     uint16_t magic;		/* a random number to confirm response */
@@ -118,6 +118,7 @@ struct icmpglobals_t {
     int index;
     int count;
     int outstanding;
+    struct sockaddr_in6 self;
 
     struct event_base *base;
     struct event *nextpackettimer;

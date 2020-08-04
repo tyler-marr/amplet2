@@ -44,6 +44,7 @@
 #include <netdb.h>
 #include <sys/time.h>
 #include <google/protobuf-c/protobuf-c.h>
+#include <netinet/in.h>
 
 
 /*
@@ -88,12 +89,27 @@ struct timestamping_t {
     struct timespec hardware;   /* hardware timestamp, if avaliabe */
 };
 
+struct ipv6_sr_hdr {
+        uint8_t    nexthdr;
+        uint8_t    hdrlen;
+        uint8_t    type;
+        uint8_t    segments_left;
+        uint8_t    first_segment;
+        uint8_t    flag_1;
+        uint8_t    flag_2;
+        uint8_t    reserved;
+
+        struct in6_addr segments[0];
+};
+
 void set_proc_name(char *testname);
 void free_duped_environ(void);
 int unblock_signals(void);
 int wait_for_data(struct socket_t *sockets, int *maxwait);
 int get_packet(struct socket_t *sockets, char *buf, int buflen,
 	struct sockaddr *saddr, int *timeout, struct timeval *now);
+int get_SRH_packet(struct socket_t *sockets, char *buf, int buflen,
+        struct ipv6_sr_hdr **srh, int *timeout, struct timeval *now);
 int delay_send_packet(int sock, char *packet, int size, struct addrinfo *dest,
         uint32_t inter_packet_delay, struct timeval *sent);
 char *address_to_name(struct addrinfo *address);

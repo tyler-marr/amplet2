@@ -385,6 +385,36 @@ static void get_tx_timestamping(int sock, uint32_t packet_id,
 #endif
 
 
+/*
+ */
+static void get_SR_header(struct msghdr *msg, struct ipv6_sr_hdr **srh) {
+
+    assert(msg);
+    assert(srh);
+    int num_segs;
+    size_t srh_len;
+
+    struct cmsghdr *cmsg;
+    struct ipv6_sr_hdr * hdr;
+
+    for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL;
+        cmsg = CMSG_NXTHDR (msg, cmsg))  {
+        if (cmsg->cmsg_level == IPPROTO_IPV6 &&
+                cmsg->cmsg_type == IPV6_RTHDR)  {
+
+            hdr = (struct ipv6_sr_hdr *)CMSG_DATA(cmsg);
+            if ( hdr->type != 4 ){
+                //Routing header type is NOT SRv6
+                return;
+            }
+            num_segs = hdr->first_segment;
+            srh_len = sizeof(*srh) + num_segs * sizeof(struct in6_addr);
+            *srh = malloc(srh_len);
+            memcpy(*srh, CMSG_DATA(cmsg), srh_len);
+        }
+    }
+}
+
 
 /*
  * Given a pair of sockets (ipv4 and ipv6), wait for data to arrive on either
@@ -544,6 +574,63 @@ int get_packet(struct socket_t *sockets, char *buf, int buflen,
 }
 
 
+/*
+ * Clone of get_packet() but includes SRH instead of source address
+ * Not sure if should just add the extra arg to get_packet() or not
+ */
+int get_SRH_packet(struct socket_t *sockets, char *buf, int buflen,
+        struct ipv6_sr_hdr **srh, int *timeout, struct timeval *now) {
+
+    int bytes;
+    int sock;
+    int family;
+    struct iovec iov;
+    struct msghdr msg;
+    char ans_data[4096];
+
+    assert(sockets);
+    assert(sockets->socket6); //SRH should only be used by IPv6
+    assert(timeout);
+
+    /* wait for data to be ready, up to timeout (wait will update it) */
+    if ( (family = wait_for_data(sockets, timeout)) <= 0 ) {
+        return 0;
+    }
+
+    /* determine which socket we have received data on and read from it */
+    if ( family != AF_INET6 ) {
+        return 0;
+    }
+    sock = sockets->socket6;
+
+    /* set up the message structure, including the user supplied packet */
+    iov.iov_base = buf;
+    iov.iov_len = buflen;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_name = NULL;
+    msg.msg_namelen = 0;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ans_data;
+    msg.msg_controllen = sizeof(ans_data);
+
+    /* receive the packet that we know is ready on one of our sockets */
+    if ( (bytes = recvmsg(sock, &msg, 0)) < 0 ) {
+        Log(LOG_ERR, "Failed to recvmsg()");
+        exit(EXIT_FAILURE);
+    }
+
+    /* populate the timestamp argument with the receive time of packet */
+    if ( now ) {
+        get_timestamp(sock, &msg, now);
+    }
+    if ( now ) {
+        get_SR_header(&msg, srh);
+    }
+
+    return bytes;
+}
+
 
 /*
  * Enforce a minimum inter-packet delay for test traffic. Try to send a packet
@@ -609,6 +696,8 @@ int delay_send_packet(int sock, char *packet, int size, struct addrinfo *dest,
     }
 
     bytes_sent = sendto(sock, packet, size, 0, dest->ai_addr, dest->ai_addrlen);
+
+    Log(LOG_DEBUG,"sendto error: %d %s",errno, strerror(errno));
 
 #ifdef HAVE_SOF_TIMESTAMPING_OPT_ID
     /* get timestamp if TIMESTAMPING is available and we know the packet id */

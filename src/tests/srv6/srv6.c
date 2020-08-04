@@ -54,6 +54,7 @@
 #include <string.h>
 #include <signal.h>
 #include <event2/event.h>
+#include <ifaddrs.h>
 
 #include "config.h"
 #include "tests.h"
@@ -125,209 +126,6 @@ static void halt_test(
 }
 
 
-
-/*
- * Check an icmp error to determine if it is in response to a packet we have
- * sent. If it is then the error needs to be recorded.
- */
-static int icmp_error(char *packet, int bytes, uint16_t ident,
-        struct info_t info[]) {
-    struct iphdr *ip, *embed_ip;
-    struct icmphdr *icmp, *embed_icmp;
-    uint16_t seq;
-    int required_bytes;
-
-    ip = (struct iphdr *)packet;
-
-    assert(ip->version == 4);
-    assert(ip->ihl >= 5);
-
-    icmp = (struct icmphdr *)(packet + (ip->ihl << 2));
-
-    /*
-     * make sure there is enough room in this packet to entertain the
-     * possibility of having embedded data - at least enough space for
-     * 2 ip headers (one of known length), 2 icmp headers.
-     */
-    required_bytes = (ip->ihl << 2) + sizeof(struct iphdr) +
-        (sizeof(struct icmphdr) * 2);
-
-    if ( bytes < required_bytes || ip->tot_len < required_bytes ) {
-	Log(LOG_DEBUG, "ICMP reply too small for embedded packet data "
-                "(got %d, need %d", bytes, required_bytes);
-	return -1;
-    }
-
-    /* get the embedded ip header */
-    embed_ip = (struct iphdr *)(packet + ((ip->ihl << 2) +
-		sizeof(struct icmphdr)));
-
-    /* obviously not a response to our test, return */
-    if ( embed_ip->version != 4 || embed_ip->protocol != IPPROTO_ICMP ) {
-        Log(LOG_DEBUG, "Embedded packet isn't ICMPv4\n");
-	return -1;
-    }
-
-    /* get the embedded icmp header */
-    embed_icmp = (struct icmphdr*)(((char *)embed_ip) + (embed_ip->ihl << 2));
-
-    /* make sure the embedded header looks like one of ours */
-    if ( embed_icmp->type > NR_ICMP_TYPES ||
-	    embed_icmp->type != ICMP_ECHO || embed_icmp->code != 0 ||
-	    ntohs(embed_icmp->un.echo.id) != ident) {
-        Log(LOG_DEBUG, "Embedded packet ICMP ECHO, or not our ECHO\n");
-	return -1;
-    }
-
-    seq = ntohs(embed_icmp->un.echo.sequence);
-    /*
-     * TODO it's possible for this to be clobbered by the most recent error
-     * (though unlikely except in the case of redirects). Do we care?
-     */
-    info[seq].err_type = icmp->type;
-    info[seq].err_code = icmp->code;
-
-    /*
-     * Don't count a redirect as a response, we are still expecting a real
-     * reply from the destination host.
-     */
-    if ( icmp->type != ICMP_REDIRECT ) {
-        info[seq].reply = 1;
-    }
-    /* TODO get ttl */
-    /*info[seq].ttl = */
-
-    return 0;
-}
-
-
-
-/*
- * Process an ICMPv4 packet to check if it is an ICMP ECHO REPLY in response to
- * a request we have sent. If so then record the time it took to get the reply.
- */
-static int process_ipv4_packet(struct icmpglobals_t *globals, char *packet,
-        uint32_t bytes, struct timeval *now) {
-
-    struct iphdr *ip;
-    struct icmphdr *icmp;
-    uint16_t seq;
-    int64_t delay;
-
-    /* make sure that we read enough data to have a valid response */
-    if ( bytes < sizeof(struct iphdr) + sizeof(struct icmphdr) +
-            sizeof(uint16_t) ) {
-        Log(LOG_DEBUG, "Too few bytes read for any valid ICMP response");
-        return -1;
-    }
-
-    /* any icmpv4 packets we get have full headers attached */
-    ip = (struct iphdr *)packet;
-
-    assert(ip->version == 4);
-    assert(ip->ihl >= 5);
-
-    /* now make sure that we read enough data for this particular ip header */
-    if ( bytes < (ip->ihl << 2) + sizeof(struct icmphdr) + sizeof(uint16_t) ) {
-        Log(LOG_DEBUG, "Too few bytes read to contain ICMP header");
-        return -1;
-    }
-
-    icmp = (struct icmphdr *)(packet + (ip->ihl << 2));
-
-    /* if it isn't an echo reply it could still be an error for us */
-    if ( icmp->type != ICMP_ECHOREPLY ) {
-	return icmp_error(packet, bytes, globals->ident, globals->info);
-    }
-
-    /* if it is an echo reply but the id doesn't match then it's not ours */
-    if ( ntohs(icmp->un.echo.id ) != globals->ident ) {
-        Log(LOG_DEBUG, "Bad ident (got %d, expected %d)",
-                ntohs(icmp->un.echo.id), globals->ident);
-	return -1;
-    }
-
-    /* check the sequence number is less than the maximum number of requests */
-    seq = ntohs(icmp->un.echo.sequence);
-    if ( seq > globals->count ) {
-        Log(LOG_DEBUG, "Bad sequence number\n");
-	return -1;
-    }
-
-    /* check that the magic value in the reply matches what we expected */
-    if ( *(uint16_t*)(((char *)packet)+(ip->ihl<< 2)+sizeof(struct icmphdr)) !=
-	    globals->info[seq].magic ) {
-        Log(LOG_DEBUG, "Bad magic value");
-	return -1;
-    }
-
-    /* reply is good, record the round trip time */
-    globals->info[seq].reply = 1;
-    globals->outstanding--;
-
-    delay = DIFF_TV_US(*now, globals->info[seq].time_sent);
-    if ( delay > 0 ) {
-        globals->info[seq].delay = (uint32_t)delay;
-    } else {
-        globals->info[seq].delay = 0;
-    }
-
-    Log(LOG_DEBUG, "Good ICMP ECHOREPLY");
-    return 0;
-}
-
-
-
-/*
- * XXX this won't record errors for ipv6 packets but the ipv4 test will. This
- * is the same behaviour as the original icmp test, but is it really what we
- * want? Should record errors for both protocols, or neither?
- */
-static int process_ipv6_packet(struct icmpglobals_t *globals, char *packet,
-        uint32_t bytes, struct timeval *now) {
-
-    struct icmp6_hdr *icmp;
-    uint16_t seq;
-    int64_t delay;
-
-    if ( bytes < sizeof(struct icmp6_hdr) ) {
-        return -1;
-    }
-
-    /* any icmpv6 packets we get have the outer ipv6 header stripped */
-    icmp = (struct icmp6_hdr *)packet;
-    seq = ntohs(icmp->icmp6_seq);
-
-    /* sanity check the various fields of the icmp header */
-    if ( icmp->icmp6_type != ICMP6_ECHO_REPLY ||
-	    ntohs(icmp->icmp6_id) != globals->ident ||
-	    seq > globals->count ) {
-	return -1;
-    }
-
-    /* check that the magic value in the reply matches what we expected */
-    if ( *(uint16_t*)(((char*)packet) + sizeof(struct icmp6_hdr)) !=
-	    globals->info[seq].magic ) {
-	return -1;
-    }
-
-    /* reply is good, record the round trip time */
-    globals->info[seq].reply = 1;
-    globals->outstanding--;
-
-    delay = DIFF_TV_US(*now, globals->info[seq].time_sent);
-    if ( delay > 0 ) {
-        globals->info[seq].delay = (uint32_t)delay;
-    } else {
-        globals->info[seq].delay = 0;
-    }
-
-    Log(LOG_DEBUG, "Good ICMP6 ECHOREPLY");
-    return 0;
-}
-
-
-
 /*
  * Callback used when a packet is received that might be a response to one
  * of our probes.
@@ -335,39 +133,73 @@ static int process_ipv6_packet(struct icmpglobals_t *globals, char *packet,
 static void receive_probe_callback(evutil_socket_t evsock,
         short flags, void *evdata) {
 
-    char packet[RESPONSE_BUFFER_LEN];
     struct timeval now;
-    struct iphdr *ip;
+    struct ipv6_sr_hdr *srh;
     ssize_t bytes;
-    int wait;
-    struct socket_t sockets;
+    int wait = 0;
+    char buf[RESPONSE_BUFFER_LEN];
+    char str[INET6_ADDRSTRLEN] = {0};
     struct icmpglobals_t *globals = (struct icmpglobals_t*)evdata;
 
     assert(evsock > 0);
     assert(flags == EV_READ);
+    struct socket_t sockets;
+    sockets.socket6 = evsock;
+    sockets.socket = -1;
 
-    wait = 0;
-
-    /* the socket used here doesn't matter as the family isn't used anywhere */
-    sockets.socket = evsock;
-    sockets.socket6 = -1;
-
-    if ( (bytes=get_packet(&sockets, packet, RESPONSE_BUFFER_LEN, NULL, &wait,
-                    &now)) > 0 ) {
-        /*
-        * this check isn't as nice as it could be - should we explicitly ask
-        * for the icmp6 header to be returned so we can be sure we are
-        * checking the right things?
-        */
-        ip = (struct iphdr*)packet;
-        switch ( ip->version ) {
-            case 4: process_ipv4_packet(globals, packet, bytes, &now);
-                break;
-            default: /* unless we ask we don't have an ipv6 header here */
-                process_ipv6_packet(globals, packet, bytes, &now);
-                break;
-        };
+    if (  (bytes = get_SRH_packet(&sockets, buf, RESPONSE_BUFFER_LEN,
+            &srh, &wait, &now)) > 0 ) {
+        //TODO add not clause
     }
+
+    int seq = 0; //this should always be 0,
+    //or in future mapped to the index of the packet 
+
+    uint16_t magic = *((uint16_t*)(buf));
+
+    /* check that the magic value in the reply matches what we expected */
+    if ( magic != globals->info[seq].magic ) {
+        Log(LOG_DEBUG, "magic did not match, was %d found %d", 
+                globals->info[seq].magic, 
+                magic
+                );
+        return;
+    }
+
+    if ( srh ) {
+        globals->info[seq].addr = malloc(
+                sizeof(struct in6_addr) * srh->first_segment);
+        memcpy(globals->info[seq].addr, &srh->segments[0],
+                sizeof(struct in6_addr) * srh->first_segment);
+        
+
+        printf("header len is %d\n", srh->hdrlen);
+        printf("header type is %d\n", srh->type);
+        printf("next header %d\n", srh->nexthdr);
+        printf("first segment is %d\n", srh->first_segment);
+        printf("reserved is %d\n", srh->reserved);
+        for (int i = 0; i < srh->first_segment; i++){
+            inet_ntop(AF_INET6, &srh->segments[i], str, sizeof(str));
+            printf("%s \n", str);
+        }
+        //after we are done with the SRH, we need to free it
+        free(srh);
+    }
+
+    /* reply is good, record the round trip time */
+    globals->info[seq].reply = 1;
+    globals->outstanding--;
+
+    int64_t delay = DIFF_TV_US(now, globals->info[seq].time_sent);
+    if ( delay > 0 ) {
+        globals->info[seq].delay = (uint32_t)delay;
+    } else {
+        globals->info[seq].delay = 0;
+    }
+
+
+
+    Log(LOG_DEBUG, "Good ICMP6 ECHOREPLY");
 
     if ( globals->outstanding == 0 && globals->index == globals->count ) {
         /* not waiting on any more packets, exit the event loop */
@@ -378,38 +210,40 @@ static void receive_probe_callback(evutil_socket_t evsock,
 
 
 
-/*
- * Build the ICMP packet and data that we send as a probe.
- */
-static int build_probe(uint8_t family, void *packet, uint16_t packet_size,
-        int seq, uint16_t ident, uint16_t magic) {
+static struct ipv6_sr_hdr * build_srh(int *srh_lenp,
+        struct icmpglobals_t *globals){
+    
+    int srh_len;
+    struct ipv6_sr_hdr *srh;
 
-    struct icmphdr *icmp;
-    int hlen;
+    // const char *segment[2];
+    // int seg_num = sizeof(segment) / sizeof(*segment);
+    // segment[0] = "fc00:0:e::1"; //R3 //these values need to be taken from input (topology file)
+    // segment[1] = "fc00:0:d::1"; //R2
 
-    assert(packet);
-    assert(packet_size >= MIN_PACKET_LEN);
+    int seg_num = globals->count;
+    srh_len = sizeof(*srh) + ((1+seg_num) * sizeof(struct in6_addr));
+    srh = malloc(srh_len);
+    if (!srh)
+        return NULL;
 
-    memset(packet, 0, packet_size);
+    srh->nexthdr = 0;
+    srh->hdrlen = 2 * (1+seg_num);
+    srh->type = 4;
+    srh->segments_left = seg_num;
+    srh->first_segment = seg_num;
+    srh->flag_1 = 0;
+    srh->flag_2 = 0;
+    srh->reserved = 0;
 
-    icmp = (struct icmphdr*)packet;
-    icmp->type = (family == AF_INET) ? ICMP_ECHO : ICMP6_ECHO_REQUEST;
-    icmp->code = 0;
-    icmp->checksum = 0;
-    icmp->un.echo.id = htons(ident);
-    icmp->un.echo.sequence = htons(seq);
-    memcpy((uint8_t *)packet + sizeof(struct icmphdr), &magic, sizeof(magic));
-
-    if ( family == AF_INET ) {
-        hlen = sizeof(struct iphdr);
-        icmp->checksum = checksum((uint16_t*)packet, packet_size - hlen);
-    } else {
-        hlen = sizeof(struct ip6_hdr);
-        /* icmp6 checksum will be calculated for us */
+    memset(&srh->segments[0], 0, sizeof(struct in6_addr));
+    for (int i = 0; i< seg_num; i++){
+        //inet_pton(AF_INET6, globals->dests[i]->ai_addr, &srh->segments[1+i]);
+        
+        memcpy(&srh->segments[1+i], &((struct sockaddr_in6 *)(globals->dests[i]->ai_addr))->sin6_addr, sizeof(struct in6_addr));
     }
-
-
-    return packet_size - hlen;
+    *srh_lenp = srh_len;
+    return srh;
 }
 
 
@@ -422,29 +256,24 @@ static void send_packet(
         __attribute__((unused))short flags,
         void *evdata) {
 
-    char *packet;
+    char *packet = NULL;
     int sock;
     int length;
     int delay;
     int seq;
-    uint16_t ident;
+    int srh_len = 0;
     struct addrinfo *dest;
     struct opt_t *opt;
     struct icmpglobals_t *globals;
     struct info_t *info;
     struct timeval timeout;
+    struct ipv6_sr_hdr *srh;
 
     globals = (struct icmpglobals_t *)evdata;
     info = globals->info;
     seq = globals->index;
-    ident = globals->ident;
     dest = globals->dests[seq];
     opt = &globals->options;
-    packet = NULL;
-
-    /* save information about this packet so we can track the response */
-    memset(&info[seq], 0, sizeof(info[seq]));
-    info[seq].addr = dest;
     info[seq].magic = rand();
 
     /* TODO should we try to send the next packet in this time slot? */
@@ -453,27 +282,39 @@ static void send_packet(
         goto next;
     }
 
-    /* determine which socket we should use, ipv4 or ipv6 */
-    switch ( dest->ai_family ) {
-	case AF_INET: sock = globals->sockets.socket; break;
-	case AF_INET6: sock = globals->sockets.socket6; break;
-	default: Log(LOG_WARNING, "Unknown address family: %d",dest->ai_family);
-                 goto next;
-    };
+    sock = globals->sockets.socket6;
 
     if ( sock < 0 ) {
-	Log(LOG_WARNING, "Unable to test to %s, socket wasn't opened",
+        Log(LOG_WARNING, "Unable to test to %s, socket wasn't opened",
                 dest->ai_canonname);
+        goto next;
+    }
+
+    srh = build_srh(&srh_len, globals);
+    if (!srh) {
+        Log(LOG_DEBUG, "failed srh");
+        close(sock);
+        goto next;
+    }
+
+    int err = setsockopt(sock, IPPROTO_IPV6, IPV6_RTHDR, srh, srh_len);
+    if (err < 0) {
+        perror("setsockopt");
+        close(sock);
         goto next;
     }
 
     /* build the probe packet */
     packet = calloc(1, opt->packet_size);
-    length = build_probe(dest->ai_family, packet, opt->packet_size, seq, ident,
-            info[seq].magic);
+    length = sizeof(info[seq].magic);
+    memcpy(packet, &info[seq].magic, length);
+
+    struct addrinfo hop;
+    hop.ai_addr =  (struct sockaddr *)&globals->self;
+    hop.ai_addrlen =  sizeof(globals->self);
 
     /* send packet with appropriate inter packet delay */
-    while ( (delay = delay_send_packet(sock, packet, length, dest,
+    while ( (delay = delay_send_packet(sock, packet, length, &hop,
                     opt->inter_packet_delay, &(info[seq].time_sent))) > 0 ) {
         usleep(delay);
     }
@@ -487,7 +328,9 @@ static void send_packet(
     }
 
 next:
-    globals->index++;
+    //globals->index++;
+    globals->index = globals->count; // this test only sends one packet now
+
     if ( globals->nextpackettimer ) {
         event_free(globals->nextpackettimer);
         globals->nextpackettimer = NULL;
@@ -501,7 +344,7 @@ next:
         } else {
             globals->losstimer = event_new(globals->base, -1, 0,
                     halt_test, globals);
-            timeout.tv_sec = LOSS_TIMEOUT;
+             timeout.tv_sec = LOSS_TIMEOUT;
             timeout.tv_usec = 0;
             event_add(globals->losstimer, &timeout);
         }
@@ -525,26 +368,33 @@ next:
  * appropriate filters for the ICMPv6 socket to only receive echo replies.
  */
 static int open_sockets(struct socket_t *sockets) {
-    if ( (sockets->socket = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP)) < 0 ) {
-	Log(LOG_WARNING, "Failed to open raw socket for ICMP");
-    }
 
-    if ( (sockets->socket6 = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6)) < 0 ) {
-	Log(LOG_WARNING, "Failed to open raw socket for ICMPv6");
+    int on = 1;
+
+    sockets->socket = -1; //does not use ipv4
+
+    if ( (sockets->socket6 = socket(AF_INET6, SOCK_DGRAM, 0)) < 0 ) {
+        Log(LOG_WARNING, "Failed to open raw socket for ICMPv6");
     } else {
-	/* configure ICMPv6 filters to only pass through ICMPv6 echo reply */
-	struct icmp6_filter filter;
-	ICMP6_FILTER_SETBLOCKALL(&filter);
-	ICMP6_FILTER_SETPASS(ICMP6_ECHO_REPLY, &filter);
-	if ( setsockopt(sockets->socket6, SOL_ICMPV6, ICMP6_FILTER,
-		    &filter, sizeof(struct icmp6_filter)) < 0 ) {
-	    Log(LOG_WARNING, "Could not set ICMPv6 filter");
-	}
+        if ( setsockopt(sockets->socket6, IPPROTO_IPV6, IPV6_RECVRTHDR,
+                &on, sizeof(on)) < 0) {
+            Log(LOG_WARNING, "Could not set IPv6 RECVHDR");
+        }
+
+
+        /* configure ICMPv6 filters to only pass through ICMPv6 echo reply */
+        // struct icmp6_filter filter;
+        // ICMP6_FILTER_SETBLOCKALL(&filter);
+        // ICMP6_FILTER_SETPASS(ICMP6_ECHO_REPLY, &filter);
+        // if ( setsockopt(sockets->socket6, SOL_ICMPV6, ICMP6_FILTER,
+        //         &filter, sizeof(struct icmp6_filter)) < 0 ) {
+        //     Log(LOG_WARNING, "Could not set ICMPv6 filter");
+        // }
     }
 
     /* make sure at least one type of socket was opened */
-    if ( sockets->socket < 0 && sockets->socket6 < 0 ) {
-	return 0;
+    if ( sockets->socket6 < 0 ) {
+        return 0;
     }
 
     return 1;
@@ -564,9 +414,10 @@ static Amplet2__Icmp__Item* report_destination(struct info_t *info) {
     /* fill the report item with results of a test */
     amplet2__icmp__item__init(item);
     item->has_family = 1;
-    item->family = info->addr->ai_family;
-    item->name = address_to_name(info->addr);
-    item->has_address = copy_address_to_protobuf(&item->address, info->addr);
+    // item->family = (info->addr[0])->ai_family;
+    // item->name = address_to_name(info->addr[0]);
+    // item->has_address = copy_address_to_protobuf(&item->address, info->addr[0]);
+    //TODO update the protobuf
 
     if ( info->reply && info->time_sent.tv_sec > 0 &&
             (info->err_type == ICMP_REDIRECT ||
@@ -696,11 +547,10 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     char *address_string;
     struct icmpglobals_t *globals;
     struct event *signal_int;
-    struct event *socket;
     struct event *socket6;
     amp_test_result_t *result;
 
-    Log(LOG_DEBUG, "Starting ICMP test");
+    Log(LOG_DEBUG, "Starting SRv6 test");
 
     globals = (struct icmpglobals_t *)malloc(sizeof(struct icmpglobals_t));
 
@@ -713,12 +563,12 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     globals->options.random = 0;
     globals->options.perturbate = 0;
     sourcev4 = NULL;
-    sourcev6 = NULL;
+    sourcev6 = NULL; //should be LO address, and specify the port
     device = NULL;
 
     while ( (opt = getopt_long(argc, argv, "p:rs:I:Q:Z:4::6::hvx",
                     long_options, NULL)) != -1 ) {
-	switch ( opt ) {
+        switch ( opt ) {
             case '4': address_string = parse_optional_argument(argv);
                       /* -4 without address is sorted at a higher level */
                       if ( address_string ) {
@@ -748,7 +598,7 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
                       break;
             case 'h': usage(); exit(EXIT_SUCCESS);
             default: usage(); exit(EXIT_FAILURE);
-	};
+        };
     }
 
     if ( count < 1 ) {
@@ -758,58 +608,89 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
 
     /* pick a random packet size within allowable boundaries */
     if ( globals->options.random ) {
-	globals->options.packet_size = MIN_PACKET_LEN +
-	    (int)((1500 - MIN_PACKET_LEN) * (random()/(RAND_MAX+1.0)));
-	Log(LOG_DEBUG, "Setting packetsize to random value: %d\n",
-		globals->options.packet_size);
+        globals->options.packet_size = MIN_PACKET_LEN +
+            (int)((1500 - MIN_PACKET_LEN) * (random()/(RAND_MAX+1.0)));
+        Log(LOG_DEBUG, "Setting packetsize to random value: %d\n",
+            globals->options.packet_size);
     }
 
     /* make sure that the packet size is big enough for our data */
     if ( globals->options.packet_size < MIN_PACKET_LEN ) {
-	Log(LOG_WARNING, "Packet size %d below minimum size, raising to %d",
-		globals->options.packet_size, MIN_PACKET_LEN);
-	globals->options.packet_size = MIN_PACKET_LEN;
+        Log(LOG_WARNING, "Packet size %d below minimum size, raising to %d",
+            globals->options.packet_size, MIN_PACKET_LEN);
+        globals->options.packet_size = MIN_PACKET_LEN;
     }
 
     /* delay the start by a random amount if perturbate is set */
     if ( globals->options.perturbate ) {
-	int delay;
-	delay = globals->options.perturbate * 1000 * (random()/(RAND_MAX+1.0));
-	Log(LOG_DEBUG, "Perturbate set to %dms, waiting %dus",
-		globals->options.perturbate, delay);
-	usleep(delay);
+        int delay;
+        delay = globals->options.perturbate * 1000 * (random()/(RAND_MAX+1.0));
+        Log(LOG_DEBUG, "Perturbate set to %dms, waiting %dus",
+            globals->options.perturbate, delay);
+        usleep(delay);
     }
 
     if ( !open_sockets(&globals->sockets) ) {
-	Log(LOG_ERR, "Unable to open raw ICMP sockets, aborting test");
-	exit(EXIT_FAILURE);
+        Log(LOG_ERR, "Unable to open raw IP sockets, aborting test");
+        exit(EXIT_FAILURE);
     }
 
     if ( set_default_socket_options(&globals->sockets) < 0 ) {
         Log(LOG_ERR, "Failed to set default socket options, aborting test");
-	exit(EXIT_FAILURE);
+        exit(EXIT_FAILURE);
     }
 
     if ( set_dscp_socket_options(&globals->sockets,globals->options.dscp) < 0 ){
         Log(LOG_ERR, "Failed to set DSCP socket options, aborting test");
-	exit(EXIT_FAILURE);
+        exit(EXIT_FAILURE);
+    }
+
+    const char * destination_address = "fc00:0:d::1"; //r2 //needs to be valid dest
+    struct sockaddr_in6 Addr = { 0 };
+    inet_pton(AF_INET6, destination_address, &( ( struct sockaddr_in6 * ) &Addr)->sin6_addr);
+    Addr.sin6_family = AF_INET6;
+    Addr.sin6_port = htons( 9 ); //9 is discard port
+
+    int Handle = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    socklen_t AddrLen = sizeof(Addr);
+
+    connect( Handle, (struct sockaddr*)&Addr, AddrLen);
+    
+    getsockname(Handle, (struct sockaddr*)&Addr, &AddrLen);
+    char source_address[INET6_ADDRSTRLEN];
+
+    struct in6_addr ipv6 = Addr.sin6_addr;
+
+    if ( inet_ntop(AF_INET6, &(ipv6), source_address, INET6_ADDRSTRLEN) == NULL) {
+        perror("inet_ntop");
+        exit(EXIT_FAILURE);
     }
 
     if ( device && bind_sockets_to_device(&globals->sockets, device) < 0 ) {
-        Log(LOG_ERR, "Unable to bind raw ICMP socket to device, aborting test");
-	exit(EXIT_FAILURE);
+        Log(LOG_ERR, "Unable to bind raw UDP socket to device, aborting test");
+        exit(EXIT_FAILURE);
+    }
+    
+    if ( bind_sockets_to_address(&globals->sockets, sourcev4,
+            get_numeric_address(source_address, NULL)) < 0 ) {
+        Log(LOG_ERR,"Unable to bind raw UDP socket to address, aborting test");
+        exit(EXIT_FAILURE);
     }
 
-    if ( (sourcev4 || sourcev6) &&
-            bind_sockets_to_address(
-                &globals->sockets, sourcev4, sourcev6) < 0 ) {
-        Log(LOG_ERR,"Unable to bind raw ICMP socket to address, aborting test");
-	exit(EXIT_FAILURE);
+    struct sockaddr_in6 sin;
+    socklen_t len = sizeof(sin);
+    if (getsockname(globals->sockets.socket6, &sin, &len) == -1) {
+        perror("getsockname");
     }
+    else{
+        printf("port number %d\n", ntohs(sin.sin6_port));
+        globals->self = sin;
+    }
+
 
     if ( gettimeofday(&start_time, NULL) != 0 ) {
-	Log(LOG_ERR, "Could not gettimeofday(), aborting test");
-	exit(EXIT_FAILURE);
+        Log(LOG_ERR, "Could not gettimeofday(), aborting test");
+        exit(EXIT_FAILURE);
     }
 
     /* use part of the current time as an identifier value */
@@ -830,10 +711,6 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     event_add(signal_int, NULL);
 
     /* set up callbacks for receiving packets */
-    socket = event_new(globals->base, globals->sockets.socket,
-            EV_READ|EV_PERSIST, receive_probe_callback, globals);
-    event_add(socket, NULL);
-
     socket6 = event_new(globals->base, globals->sockets.socket6,
             EV_READ|EV_PERSIST, receive_probe_callback, globals);
     event_add(socket6, NULL);
@@ -855,10 +732,6 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
         event_free(globals->nextpackettimer);
     }
 
-    if ( socket ) {
-        event_free(socket);
-    }
-
     if ( socket6 ) {
         event_free(socket6);
     }
@@ -870,11 +743,11 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     event_base_free(globals->base);
 
     if ( globals->sockets.socket > 0 ) {
-	close(globals->sockets.socket);
+        close(globals->sockets.socket);
     }
 
     if ( globals->sockets.socket6 > 0 ) {
-	close(globals->sockets.socket6);
+        close(globals->sockets.socket6);
     }
 
     if ( sourcev4 ) {
@@ -886,6 +759,7 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     }
 
     /* send report */
+    count = 1;
     result = report_results(&start_time, count, globals->info,
             &globals->options);
 
