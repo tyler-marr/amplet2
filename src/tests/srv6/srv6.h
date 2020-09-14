@@ -106,6 +106,13 @@ struct info_t {
 
 
 
+struct path {
+    struct addrinfo *first_hop;
+    int path_length;
+    struct path *next;
+};
+
+
 /*
  * Global test options and pointers to the probe information blocks.
  */
@@ -113,6 +120,9 @@ struct icmpglobals_t {
     struct opt_t options;
     struct socket_t sockets;
     struct addrinfo **dests;
+    struct addrinfo **paths_array;
+    struct path *paths;
+    int path_count;
     struct info_t *info;
     uint16_t ident;
     int index;

@@ -75,6 +75,7 @@
 
 static struct option long_options[] = {
     {"perturbate", required_argument, 0, 'p'},
+    {"path", required_argument, 0, 'P'},
     {"random", no_argument, 0, 'r'},
     {"size", required_argument, 0, 's'},
     {"dscp", required_argument, 0, 'Q'},
@@ -147,6 +148,8 @@ static void receive_probe_callback(evutil_socket_t evsock,
     sockets.socket6 = evsock;
     sockets.socket = -1;
 
+    printf("recieved packet\n");
+
     if (  (bytes = get_SRH_packet(&sockets, buf, RESPONSE_BUFFER_LEN,
             &srh, &wait, &now)) > 0 ) {
         //TODO add not clause
@@ -201,7 +204,7 @@ static void receive_probe_callback(evutil_socket_t evsock,
 
     Log(LOG_DEBUG, "Good ICMP6 ECHOREPLY");
 
-    if ( globals->outstanding == 0 && globals->index == globals->count ) {
+    if ( globals->outstanding == 0 && globals->index == globals->path_count ) {
         /* not waiting on any more packets, exit the event loop */
         Log(LOG_DEBUG, "All expected ICMP responses received");
         event_base_loopbreak(globals->base);
@@ -211,17 +214,17 @@ static void receive_probe_callback(evutil_socket_t evsock,
 
 
 static struct ipv6_sr_hdr * build_srh(int *srh_lenp,
-        struct icmpglobals_t *globals){
+        struct addrinfo *path){
     
     int srh_len;
     struct ipv6_sr_hdr *srh;
+    int path_length = 0;
 
-    // const char *segment[2];
-    // int seg_num = sizeof(segment) / sizeof(*segment);
-    // segment[0] = "fc00:0:e::1"; //R3 //these values need to be taken from input (topology file)
-    // segment[1] = "fc00:0:d::1"; //R2
+    for (struct addrinfo *temp = path; temp; temp = temp->ai_next){
+        path_length+=1;
+    }
 
-    int seg_num = globals->count;
+    int seg_num = path_length;
     srh_len = sizeof(*srh) + ((1+seg_num) * sizeof(struct in6_addr));
     srh = malloc(srh_len);
     if (!srh)
@@ -237,10 +240,14 @@ static struct ipv6_sr_hdr * build_srh(int *srh_lenp,
     srh->reserved = 0;
 
     memset(&srh->segments[0], 0, sizeof(struct in6_addr));
-    for (int i = 0; i< seg_num; i++){
+    //for (int i = 0; i< seg_num; i++){
+    int i =0;
+    for (struct addrinfo *temp = path; temp; temp = temp->ai_next){
         //inet_pton(AF_INET6, globals->dests[i]->ai_addr, &srh->segments[1+i]);
         
-        memcpy(&srh->segments[1+i], &((struct sockaddr_in6 *)(globals->dests[i]->ai_addr))->sin6_addr, sizeof(struct in6_addr));
+        memcpy(&srh->segments[1+i], 
+                &((struct sockaddr_in6 *)(temp->ai_addr))->sin6_addr, sizeof(struct in6_addr));
+        i++;
     }
     *srh_lenp = srh_len;
     return srh;
@@ -262,7 +269,7 @@ static void send_packet(
     int delay;
     int seq;
     int srh_len = 0;
-    struct addrinfo *dest;
+    struct addrinfo *path;
     struct opt_t *opt;
     struct icmpglobals_t *globals;
     struct info_t *info;
@@ -272,13 +279,13 @@ static void send_packet(
     globals = (struct icmpglobals_t *)evdata;
     info = globals->info;
     seq = globals->index;
-    dest = globals->dests[seq];
+    path = globals->paths_array[seq];
     opt = &globals->options;
     info[seq].magic = rand();
 
     /* TODO should we try to send the next packet in this time slot? */
-    if ( !dest->ai_addr ) {
-        Log(LOG_INFO, "No address for target %s, skipping", dest->ai_canonname);
+    if ( !path->ai_addr ) {
+        Log(LOG_INFO, "No address for target %s, skipping", path->ai_canonname);
         goto next;
     }
 
@@ -286,11 +293,11 @@ static void send_packet(
 
     if ( sock < 0 ) {
         Log(LOG_WARNING, "Unable to test to %s, socket wasn't opened",
-                dest->ai_canonname);
+                path->ai_canonname);
         goto next;
     }
 
-    srh = build_srh(&srh_len, globals);
+    srh = build_srh(&srh_len, path);
     if (!srh) {
         Log(LOG_DEBUG, "failed srh");
         close(sock);
@@ -327,16 +334,27 @@ static void send_packet(
         globals->outstanding++;
     }
 
+    // char buffer[549];
+    // struct sockaddr_storage src_addr;
+    // socklen_t src_addr_len=sizeof(src_addr);
+    // ssize_t count=recv(sock,buffer,sizeof(buffer),0);
+    // if (count==-1) {
+    //     printf("%s\n",strerror(errno));
+    // } else if (count==sizeof(buffer)) {
+    //     printf("datagram too large for buffer: truncated");
+    // } else {
+    //     printf("recieved %d\n",count);
+    // }
+
 next:
-    //globals->index++;
-    globals->index = globals->count; // this test only sends one packet now
+    globals->index++;
 
     if ( globals->nextpackettimer ) {
         event_free(globals->nextpackettimer);
         globals->nextpackettimer = NULL;
     }
     /* create timer for sending the next packet if there are still more to go */
-    if ( globals->index == globals->count ) {
+    if ( globals->index == globals->path_count ) {
         Log(LOG_DEBUG, "Reached final target: %d", globals->index);
         if ( globals->outstanding == 0 ) {
             /* avoid waiting for LOSS_TIMEOUT if no packets are outstanding */
@@ -512,7 +530,8 @@ static amp_test_result_t* report_results(struct timeval *start_time, int count,
  */
 static void usage(void) {
     fprintf(stderr,
-            "Usage: amp-icmp [-hrvx] [-p perturbate] [-s packetsize]\n"
+            "Usage: amp-srv6 [-hrvx] [-p perturbate] [-s packetsize]\n"
+            "                -P [comma seperated list of hops]\n"
             "                [-Q codepoint] [-Z interpacketgap]\n"
             "                [-I interface] [-4 [sourcev4]] [-6 [sourcev6]]\n"
             "                -- destination1 [destination2 ... destinationN]"
@@ -530,6 +549,60 @@ static void usage(void) {
     print_probe_usage();
     print_interface_usage();
     print_generic_usage();
+}
+
+
+
+int parse_pathlist(char *address_string, struct icmpglobals_t *globals) {
+    
+    char *str;
+    struct addrinfo *addr;
+    struct addrinfo *res = NULL;
+    char * delim = ',';
+    int path_length = 0;
+
+    str = strtok(address_string, &delim);
+
+    while ( str ) {
+        if ( (addr = get_numeric_address(str, NULL)) ) {
+            struct addrinfo *keeper = calloc(1, sizeof(struct addrinfo));
+
+            keeper->ai_flags = addr->ai_flags;
+            keeper->ai_family = addr->ai_family;
+            keeper->ai_socktype = addr->ai_socktype;
+            keeper->ai_protocol = addr->ai_protocol;
+            keeper->ai_addrlen = addr->ai_addrlen;
+            keeper->ai_addr = calloc(1, keeper->ai_addrlen);
+
+            assert(keeper->ai_addrlen > 0);
+            assert(keeper->ai_addr);
+
+            memcpy(keeper->ai_addr, addr->ai_addr, keeper->ai_addrlen);
+            keeper->ai_canonname = strdup(str);
+            keeper->ai_next = res;
+            res = keeper;
+
+            /* free the getaddrinfo() allocated memory */
+            freeaddrinfo(addr);
+            str = strtok(NULL, &delim);
+            path_length +=1;
+            continue;
+        }
+        //cleanup previous addrs
+        return 0;
+    }
+
+
+    globals->path_count += 1;
+
+
+
+
+    globals->paths_array = realloc(
+        globals->paths_array, sizeof(struct addrinfo *)*globals->path_count);
+    globals->paths_array[globals->path_count-1] = res;
+    
+    return 1;
 }
 
 
@@ -562,11 +635,13 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     globals->options.packet_size = DEFAULT_ICMP_ECHO_REQUEST_LEN;
     globals->options.random = 0;
     globals->options.perturbate = 0;
+    globals->paths_array = NULL;
+    globals->path_count = 0;
     sourcev4 = NULL;
     sourcev6 = NULL; //should be LO address, and specify the port
     device = NULL;
 
-    while ( (opt = getopt_long(argc, argv, "p:rs:I:Q:Z:4::6::hvx",
+    while ( (opt = getopt_long(argc, argv, "p:P:rs:I:Q:Z:4::6::hvx",
                     long_options, NULL)) != -1 ) {
         switch ( opt ) {
             case '4': address_string = parse_optional_argument(argv);
@@ -596,13 +671,21 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
             case 'x': log_level = LOG_DEBUG;
                       log_level_override = 1;
                       break;
+            case 'P':
+                      address_string = parse_optional_argument(argv);
+                      /* -6 without address is sorted at a higher level */
+                      
+                      if ( address_string ) {
+                          parse_pathlist(address_string, globals);
+                      }
+                      break;
             case 'h': usage(); exit(EXIT_SUCCESS);
             default: usage(); exit(EXIT_FAILURE);
         };
     }
 
-    if ( count < 1 ) {
-        Log(LOG_WARNING, "No resolvable destinations were specified!");
+    if ( count > 0 ) {
+        Log(LOG_WARNING, "amp-srv6 does not take resolvable destinations!");
         exit(EXIT_FAILURE);
     }
 
@@ -645,7 +728,7 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
         exit(EXIT_FAILURE);
     }
 
-    const char * destination_address = "fc00:0:d::1"; //r2 //needs to be valid dest
+    const char * destination_address = "fc00:0:10::1"; //r2 //needs to be valid dest
     struct sockaddr_in6 Addr = { 0 };
     inet_pton(AF_INET6, destination_address, &( ( struct sockaddr_in6 * ) &Addr)->sin6_addr);
     Addr.sin6_family = AF_INET6;
@@ -653,15 +736,13 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
 
     int Handle = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     socklen_t AddrLen = sizeof(Addr);
-
-    connect( Handle, (struct sockaddr*)&Addr, AddrLen);
-    
+    connect( Handle, (struct sockaddr*)&Addr, AddrLen);    
     getsockname(Handle, (struct sockaddr*)&Addr, &AddrLen);
+    close (Handle);
+
     char source_address[INET6_ADDRSTRLEN];
 
-    struct in6_addr ipv6 = Addr.sin6_addr;
-
-    if ( inet_ntop(AF_INET6, &(ipv6), source_address, INET6_ADDRSTRLEN) == NULL) {
+    if ( inet_ntop(AF_INET6, &(Addr.sin6_addr), source_address, INET6_ADDRSTRLEN) == NULL) {
         perror("inet_ntop");
         exit(EXIT_FAILURE);
     }
@@ -670,8 +751,8 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
         Log(LOG_ERR, "Unable to bind raw UDP socket to device, aborting test");
         exit(EXIT_FAILURE);
     }
-    
-    if ( bind_sockets_to_address(&globals->sockets, sourcev4,
+
+    if ( bind_sockets_to_address(&globals->sockets, NULL,
             get_numeric_address(source_address, NULL)) < 0 ) {
         Log(LOG_ERR,"Unable to bind raw UDP socket to address, aborting test");
         exit(EXIT_FAILURE);
@@ -697,12 +778,12 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
     globals->ident = (uint16_t)start_time.tv_usec;
 
     /* allocate space to store information about each request sent */
-    globals->info = (struct info_t *)malloc(sizeof(struct info_t) * count);
+    globals->info = (struct info_t *)calloc(sizeof(struct info_t),globals->path_count);
 
     globals->index = 0;
     globals->outstanding = 0;
-    globals->count = count;
-    globals->dests = dests;
+
+
     globals->losstimer = NULL;
 
     /* catch a SIGINT and end the test early */
@@ -760,7 +841,7 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
 
     /* send report */
     count = 1;
-    result = report_results(&start_time, count, globals->info,
+    result = report_results(&start_time, globals->path_count, globals->info,
             &globals->options);
 
     free(globals->info);
