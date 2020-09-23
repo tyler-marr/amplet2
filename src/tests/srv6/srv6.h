@@ -69,7 +69,8 @@
  * We don't get the ipv6 header, so the ipv4 version is the bigger of the two.
  */
 #define RESPONSE_BUFFER_LEN ( \
-        sizeof(struct iphdr) + 60 + sizeof(struct icmphdr) + 8)
+        sizeof(struct iphdr) + 60 + sizeof(struct icmphdr) + 8) \
+        + sizeof (uint8_t)
 
 /* timeout (seconds) to wait after the last probe packet, currently 10s */
 #define LOSS_TIMEOUT 10
@@ -95,6 +96,7 @@ struct opt_t {
  */
 struct info_t {
     struct in6_addr *addr;	/* address list probe was sent to */
+    struct ipv6_sr_hdr *srh;
     struct timeval time_sent;	/* when the probe was sent */
     uint32_t delay;		/* delay in receiving response, microseconds */
     uint16_t magic;		/* a random number to confirm response */
@@ -112,6 +114,11 @@ struct path {
     struct path *next;
 };
 
+struct magic_seq {
+    uint16_t seq;
+    uint16_t magic;
+};
+
 
 /*
  * Global test options and pointers to the probe information blocks.
@@ -125,10 +132,11 @@ struct icmpglobals_t {
     int path_count;
     struct info_t *info;
     uint16_t ident;
-    int index;
+    uint16_t index;
     int count;
     int outstanding;
     struct sockaddr_in6 self;
+    int icmp_sock;
 
     struct event_base *base;
     struct event *nextpackettimer;

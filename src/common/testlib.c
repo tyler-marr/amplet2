@@ -415,6 +415,28 @@ static void get_SR_header(struct msghdr *msg, struct ipv6_sr_hdr **srh) {
     }
 }
 
+/*
+ */
+static int get_hoplimit(struct msghdr *msg) {
+
+    assert(msg);
+
+
+    struct cmsghdr *cmsg;
+    int ttl = -1;
+    for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL;
+        cmsg = CMSG_NXTHDR (msg, cmsg))  {
+        if (cmsg->cmsg_level == IPPROTO_IPV6 &&
+                cmsg->cmsg_type == IPV6_HOPLIMIT)  {
+
+            uint8_t * ttlPtr = (uint8_t *)CMSG_DATA(cmsg);
+            ttl = *ttlPtr;
+            break;
+        }
+    }
+    return ttl;
+}
+
 
 /*
  * Given a pair of sockets (ipv4 and ipv6), wait for data to arrive on either
@@ -579,14 +601,14 @@ int get_packet(struct socket_t *sockets, char *buf, int buflen,
  * Not sure if should just add the extra arg to get_packet() or not
  */
 int get_SRH_packet(struct socket_t *sockets, char *buf, int buflen,
-        struct ipv6_sr_hdr **srh, int *timeout, struct timeval *now) {
+        struct ipv6_sr_hdr **srh, int *timeout, struct timeval *now, int *hoplimit) {
 
     int bytes;
     int sock;
     int family;
     struct iovec iov;
     struct msghdr msg;
-    char ans_data[4096];
+    char ans_data[4096]; //this needs to be a specfic value?
 
     assert(sockets);
     assert(sockets->socket6); //SRH should only be used by IPv6
@@ -626,6 +648,9 @@ int get_SRH_packet(struct socket_t *sockets, char *buf, int buflen,
     }
     if ( now ) {
         get_SR_header(&msg, srh);
+    }
+    if (hoplimit){
+        *hoplimit = get_hoplimit(&msg);
     }
 
     return bytes;

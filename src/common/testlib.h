@@ -89,6 +89,10 @@ struct timestamping_t {
     struct timespec hardware;   /* hardware timestamp, if avaliabe */
 };
 
+/* 
+ * Structure representing the SRv6 header
+ * should be defined somewhere but this works for now, TODO
+ */
 struct ipv6_sr_hdr {
         uint8_t    nexthdr;
         uint8_t    hdrlen;
@@ -99,6 +103,12 @@ struct ipv6_sr_hdr {
         uint8_t    flag_2;
         uint8_t    reserved;
 
+        /*
+         * when allocating this struct, leave enough room on the end for 
+         * struct in6_addr[first_segment-1]
+         * ie malloc(sizeof(struct ipv6_sr_hdr)+
+         *     ((first_segment-1)*sizeof(struct in6_addr)))
+         */
         struct in6_addr segments[0];
 };
 
@@ -109,7 +119,8 @@ int wait_for_data(struct socket_t *sockets, int *maxwait);
 int get_packet(struct socket_t *sockets, char *buf, int buflen,
 	struct sockaddr *saddr, int *timeout, struct timeval *now);
 int get_SRH_packet(struct socket_t *sockets, char *buf, int buflen,
-        struct ipv6_sr_hdr **srh, int *timeout, struct timeval *now);
+        struct ipv6_sr_hdr **srh, int *timeout, struct timeval *now,
+        int *hoplimit);
 int delay_send_packet(int sock, char *packet, int size, struct addrinfo *dest,
         uint32_t inter_packet_delay, struct timeval *sent);
 char *address_to_name(struct addrinfo *address);

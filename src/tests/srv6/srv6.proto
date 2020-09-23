@@ -62,4 +62,20 @@ message Item {
     optional uint32 ttl = 6;
     /** The name of the test target (as given in the schedule) */
     optional string name = 7;
+    /** The path taken to reach the target address */
+    repeated Hop path = 8;
+}
+
+
+/**
+ * Each path consists of a number of hops, listed in the order they were
+ * encountered (based on TTL values).
+ */
+message Hop {
+    /** The address that responded to the probe packet */
+    optional bytes address = 1;
+    /** The ASN that the responding address belongs to */
+    /**optional sint64 asn = 2;**/
+    /** The round trip time to the responding host, measured in microseconds */
+    /**optional uint32 rtt = 3;**/
 }
