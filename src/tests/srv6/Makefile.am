@@ -11,7 +11,7 @@ amp_srv6_LDADD=srv6.la -L../../common/ -lamp -lprotobuf-c -lunbound -levent
 amp_srv6_LDFLAGS=-Wl,--no-as-needed
 
 test_LTLIBRARIES=srv6.la
-srv6_la_SOURCES=srv6.c
+srv6_la_SOURCES=srv6.c srv6_client.c srv6_server.c
 nodist_srv6_la_SOURCES=srv6.pb-c.c
 srv6_la_LDFLAGS=-module -avoid-version -L../../common/ -lamp -lprotobuf-c -levent
 

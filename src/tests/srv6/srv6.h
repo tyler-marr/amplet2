@@ -48,13 +48,21 @@
 #include <netinet/ip_icmp.h>
 #include <stdint.h>
 #include <sys/time.h>
+#include <event2/event.h>
 
 #include "testlib.h"
+#include "serverlib.h"
 
 
 
 /* by default use an 84 byte packet, because that's what it has always been */
 #define DEFAULT_ICMP_ECHO_REQUEST_LEN 84
+
+#define DEFAULT_CONTROL_PORT  8815
+#define MAX_CONTROL_PORT  8825
+#define DEFAULT_TEST_PORT 8826
+#define MAX_TEST_PORT 8836
+//borrowed from throughput test for now, should change later?
 
 /*
  * We can mix ipv4 and ipv6 targets in our tests, so set the minimum packet
@@ -89,21 +97,44 @@ struct opt_t {
 };
 
 
+struct magic_seq {
+    uint16_t global_index; /* this tests index in global->array */
+    uint16_t target_index; /* this tests index in global->targets */
+    uint16_t magic;
+};
+
 
 /*
  * Information block recording data for each icmp echo request test packet
  * that is sent, and when the response is received.
  */
 struct info_t {
-    struct in6_addr *addr;	/* address list probe was sent to */
-    struct ipv6_sr_hdr *srh;
-    struct timeval time_sent;	/* when the probe was sent */
-    uint32_t delay;		/* delay in receiving response, microseconds */
-    uint16_t magic;		/* a random number to confirm response */
-    uint8_t reply;		/* set to 1 once we have a reply */
-    uint8_t err_type;		/* type of ICMP error reply or 0 if no error */
-    uint8_t err_code;		/* code of ICMP error reply, else undefined */
-    uint8_t ttl;		/* TTL or hop limit of response packet */
+    struct in6_addr *addr;      /* address list probe was sent to */
+    struct ipv6_sr_hdr *srh;    /* premade srh header */
+    int srh_len;                /* lenght of the SRv6 header */
+    struct timeval time_sent;   /* when the probe was sent */
+    uint32_t delay;             /* delay in receiving response, microseconds */   
+    uint8_t reply;              /* set to 1 once we have a reply */
+    uint8_t err_type;           /* type of ICMP error reply or 0 if no error */
+    uint8_t err_code;           /* code of ICMP error reply, else undefined */
+    uint8_t ttl;                /* TTL or hop limit of response packet */
+    int is_local;               /* if the target is the local amplet */
+    /* a random number and indices to confirm response */
+    struct magic_seq magic;
+};
+
+struct target_group_t {
+    //struct in6_addr *addr; //endpoints addrs, 
+    struct addrinfo *addr;
+    int is_local;
+    //could change this to a sock_addr to include the port number
+
+
+    //each index in globals->info that contains this targets test
+    int *tests;
+    int num_tests;              //number of tests
+    uint16_t port;
+    BIO* ctrl;
 };
 
 
@@ -114,9 +145,13 @@ struct path {
     struct path *next;
 };
 
-struct magic_seq {
-    uint16_t seq;
-    uint16_t magic;
+
+struct srv6_shared_globals {
+    struct info_t *info;
+    int info_count;
+    int outstanding;
+    struct event_base *base;
+    struct event *losstimer;
 };
 
 
@@ -129,18 +164,30 @@ struct icmpglobals_t {
     struct addrinfo **dests;
     struct addrinfo **paths_array;
     struct path *paths;
-    int path_count;
-    struct info_t *info;
-    uint16_t ident;
+    struct addrinfo **endpoints;
+
+    int unique_endpoints;
+
     uint16_t index;
+    int path_count;
+
+    uint16_t ident;
+
     int count;
-    int outstanding;
+
     struct sockaddr_in6 self;
     int icmp_sock;
+    struct target_group_t *targets;
+    int target_count;
+    struct target_group_t self_target;
 
-    struct event_base *base;
     struct event *nextpackettimer;
-    struct event *losstimer;
+    struct srv6_shared_globals shared;
+};
+
+
+struct server_global_t {
+    struct srv6_shared_globals shared;
 };
 
 
@@ -148,6 +195,19 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
         struct addrinfo **dests);
 void print_srv6(amp_test_result_t *result);
 test_t *register_test(void);
+amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
+        struct addrinfo **dests);
+amp_test_result_t* run_srv6_server(int argc, char *argv[], BIO *ctrl);
+void receive_probe_callback(evutil_socket_t evsock,
+        short flags, void *evdata);
+void interrupt_test(
+        __attribute__((unused))evutil_socket_t evsock,
+        __attribute__((unused))short flags,
+        void * evdata);
+void halt_test(
+    __attribute__((unused))evutil_socket_t evsock,
+    __attribute__((unused))short flags,
+    void *evdata);
 
 #if UNIT_TEST
 int amp_test_process_ipv4_packet(struct icmpglobals_t *globals, char *packet,

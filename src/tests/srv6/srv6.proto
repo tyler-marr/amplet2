@@ -1,8 +1,8 @@
 /**
- * Data reporting messages for the AMP ICMP latency test.
+ * Data reporting messages for the AMP SRv6 connectivity test.
  *
- * This test measures the latency taken between sending an ICMP echo request
- * to a given list of targets and receiving a useful ICMP echo reply.
+ * This test measures the connectivity between the local amplet and either a
+ * remote amplet or itself via a list of hops or segments.
  *
  * Each message contains one Report.
  * Each Report contains one Header and one Item per result.
@@ -52,30 +52,79 @@ message Item {
     optional bytes address = 1;
     /** The family the responding address belongs to (AF_INET/AF_INET6) */
     optional int32 family = 2;
-    /** The round trip time to the target, measured in microseconds */
+    /** The round trip time to the target, if the target was self
+      * measured in microseconds */
     optional uint32 rtt = 3;
     /** The ICMP error type, if present */
     optional uint32 err_type = 4;
     /** The ICMP error code, if present */
     optional uint32 err_code = 5;
-    /** The TTL of the response (XXX: currently not reported) */
+    /** The TTL(hoplimit) of the probe */
     optional uint32 ttl = 6;
     /** The name of the test target (as given in the schedule) */
     optional string name = 7;
-    /** The path taken to reach the target address */
+    /** The path taken to reach the target */
     repeated Hop path = 8;
 }
 
 
 /**
  * Each path consists of a number of hops, listed in the order they were
- * encountered (based on TTL values).
+ * traversed.
  */
 message Hop {
     /** The address that responded to the probe packet */
     optional bytes address = 1;
-    /** The ASN that the responding address belongs to */
-    /**optional sint64 asn = 2;**/
-    /** The round trip time to the responding host, measured in microseconds */
-    /**optional uint32 rtt = 3;**/
+}
+
+
+
+/**
+ * Message to send to the remote target to start test, contains basic options
+ * and list of tests to expect.
+ */
+message Hello {
+    /*
+    extend amplet2.servers.Hello {
+        optional Hello data = 106;
+    }
+    */
+
+    optional uint32 random = 1;
+    optional uint32 perturbate = 2;
+    optional uint32 packet_size = 3;
+    optional uint32 inter_packet_delay = 4;
+    optional uint32 dscp = 5;
+    repeated Probe probes = 6;
+
+}
+
+/**
+ * A report
+ */
+message Result {
+    optional uint32 was_Recieved = 1;
+    optional uint32 ttl = 2;
+    repeated Hop path = 3;
+}
+
+
+/**
+ * Final respone from the target containning the results (or lack thereof) of 
+ * the list of tests.
+ */
+message Goodbye {
+    repeated Result results = 1;
+}
+
+/**
+ * Information about a particular test, the incomming probe will contain an 
+ * index to the magic number used to identify the probe.
+ */
+message Probe {
+
+    optional uint32 magic = 1;
+    optional uint32 global_index = 2;
+    optional uint32 target_index = 3;
+
 }

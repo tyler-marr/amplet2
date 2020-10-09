@@ -60,6 +60,7 @@
 #define AMP_TEST_FASTPING           11
 #define AMP_TEST_EXTERNAL           12
 #define AMP_TEST_SIP                13
+#define AMP_TEST_SRV6               14
 
 typedef struct amp_test_result {
     uint64_t timestamp;
