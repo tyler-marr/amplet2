@@ -77,10 +77,10 @@
 static void* parse_hello(ProtobufCBinaryData *data) {
 
     struct server_global_t *globals;
-    Amplet2__Icmp__Hello *hello;
+    Amplet2__Srv6__Hello *hello;
     struct info_t *new_test;
 
-    hello = amplet2__icmp__hello__unpack(NULL, data->len, data->data);
+    hello = amplet2__srv6__hello__unpack(NULL, data->len, data->data);
     globals = calloc(1, sizeof(*globals));
 
     globals->shared.info_count = hello->n_probes;
@@ -98,7 +98,7 @@ static void* parse_hello(ProtobufCBinaryData *data) {
         
     }
 
-    amplet2__icmp__hello__free_unpacked(hello, NULL);
+    amplet2__srv6__hello__free_unpacked(hello, NULL);
 
     return globals;
 }
@@ -156,16 +156,10 @@ static int serveTest(BIO *ctrl, struct server_global_t *globals) {
         Log(LOG_DEBUG, "HELLO error");
     }
 
-    Log(LOG_DEBUG, "Recieved HELLO message %ld", globals->shared.info_count);
+    Log(LOG_DEBUG, "Recieved HELLO message with %ld tests", globals->shared.info_count);
     for (int i = 0; i < globals->shared.info_count; i++){
 
         curr_test = &globals->shared.info[i];
-
-        printf("probe[%d] %d %d %d\n", 
-            i,
-            curr_test->magic.magic, 
-            curr_test->magic.global_index,
-            curr_test->magic.target_index);
     }
 
     
@@ -198,6 +192,7 @@ static int serveTest(BIO *ctrl, struct server_global_t *globals) {
 
     if (sock.socket6 < 0) {
         printf("scok didnt open\n");
+        Log(LOG_WARNING, "Failed to start socket");
 
     }
     int on = 1;
@@ -257,7 +252,7 @@ static int serveTest(BIO *ctrl, struct server_global_t *globals) {
             globals->shared.info_count - globals->shared.outstanding);
 
     //build items for each test, maybe could build them earlier?
-    Amplet2__Icmp__Goodbye goodbye = AMPLET2__ICMP__GOODBYE__INIT;
+    Amplet2__Srv6__Goodbye goodbye = AMPLET2__SRV6__GOODBYE__INIT;
     goodbye.n_results = globals->shared.info_count;
     goodbye.results = calloc(
             sizeof(*goodbye.results),
@@ -266,12 +261,12 @@ static int serveTest(BIO *ctrl, struct server_global_t *globals) {
     for (int i = 0; i < globals->shared.info_count; i++){
 
         goodbye.results[i] = malloc(sizeof(*goodbye.results[i]));
-        Amplet2__Icmp__Result *curr_result = goodbye.results[i];
+        Amplet2__Srv6__Result *curr_result = goodbye.results[i];
 
 
         curr_test = &globals->shared.info[i];
 
-        amplet2__icmp__result__init(curr_result);
+        amplet2__srv6__result__init(curr_result);
 
         curr_result->has_ttl = 1;
         curr_result->ttl = curr_test->ttl;
@@ -282,21 +277,20 @@ static int serveTest(BIO *ctrl, struct server_global_t *globals) {
         //paths doesnt matter on this end, the client can work that out
 
 
-        printf("Test[%d]", i);
-
         if ( curr_test->reply != 1 ) {
             //test was not responded to,
             //will still need to tell amp about this 
-            printf(" MISSING\n");
+
+            Log(LOG_INFO, "Probe ID[%d] is missing", i);
             continue;
         }
-        printf(" HOPLIM:%d\n", curr_test->ttl);
+        Log(LOG_INFO, "Probe ID[%d] has HOPLIM:%d", i, curr_test->ttl);
     }
 
     ProtobufCBinaryData *data = malloc(sizeof(ProtobufCBinaryData));
-    data->len = amplet2__icmp__goodbye__get_packed_size(&goodbye);
+    data->len = amplet2__srv6__goodbye__get_packed_size(&goodbye);
     data->data = malloc(data->len);
-    amplet2__icmp__goodbye__pack(&goodbye, data->data);
+    amplet2__srv6__goodbye__pack(&goodbye, data->data);
 
     /* send result to the client for reporting */
     if ( send_control_result(AMP_TEST_SRV6, ctrl, data) < 0 ) {

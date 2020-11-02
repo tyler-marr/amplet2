@@ -552,7 +552,7 @@ struct ub_ctx* get_dns_context_config(cfg_t *cfg, amp_test_meta_t *meta) {
  */
 void get_default_test_args(cfg_t *cfg) {
     cfg_t *cfg_defaults;
-    int i;
+    unsigned int i;
 
     for ( i = 0; i < cfg_size(cfg, "defaults"); i++ ) {
         test_t *test;

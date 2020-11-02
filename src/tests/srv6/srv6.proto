@@ -9,7 +9,7 @@
  * Each Item contains information on a test result.
  */
 syntax = "proto2";
-package amplet2.icmp;
+package amplet2.srv6;
 
 
 /**

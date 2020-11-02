@@ -6,7 +6,7 @@ CLEANFILES=srv6.pb-c.c srv6.pb-c.h
 testdir=$(libdir)/$(PACKAGE)/tests
 
 bin_PROGRAMS=amp-srv6
-amp_srv6_SOURCES=../testmain.c
+amp_srv6_SOURCES=../testmain.c ../../measured/nametable.c
 amp_srv6_LDADD=srv6.la -L../../common/ -lamp -lprotobuf-c -lunbound -levent
 amp_srv6_LDFLAGS=-Wl,--no-as-needed
 

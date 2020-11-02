@@ -256,7 +256,9 @@ static void randomMemset(void *data, unsigned int size) {
         return;
     }
 
-    read(fd, data, size);
+    if ( read(fd, data, size) != size ){
+        Log(LOG_WARNING, "Failed to read from /dev/urandom");
+    }
     close(fd);
 }
 

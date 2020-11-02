@@ -68,6 +68,11 @@
 #include "usage.h"
 #include "checksum.h"
 #include "controlmsg.h"
+#include "../../measured/control.h"//XXX just for control port define
+#include "ssl.h"
+#include "ampresolv.h"
+#include "global.h"
+#include "../../measured/nametable.h"
 
 
 /*
@@ -274,10 +279,8 @@ static void send_packet(
     opt = &globals->options;
     if ( !curr_test->is_local )  {
         target = &globals->targets[curr_test->magic.target_index];
-        printf("global  target:%d\n",curr_test->magic.global_index);
     } else {
         target = &globals->self_target;
-        printf("local  target:%d\n",curr_test->magic.global_index);
     }
 
     /* TODO should we try to send the next packet in this time slot? */
@@ -287,6 +290,12 @@ static void send_packet(
         goto next;
     }
 
+    Log(LOG_DEBUG, "Sending to target[%d] %s:%d\n",
+            curr_test->magic.global_index,
+            target->name,
+            htons(((struct sockaddr_in6*)(target->addr->ai_addr))->sin6_port));
+                
+
     sock = globals->sockets.socket6;
 
     if ( sock < 0 ) {
@@ -294,7 +303,6 @@ static void send_packet(
         goto next;
     }
 
-    printf("sending to %d\n",htons(((struct sockaddr_in6*)(target->addr->ai_addr))->sin6_port));
     target->addr->ai_addrlen = sizeof(struct sockaddr_in6);
 
     int err = setsockopt(sock, IPPROTO_IPV6, IPV6_RTHDR,
@@ -351,8 +359,8 @@ next:
 
 
 /*
- * Open the raw ICMP and ICMPv6 sockets used for this test and configure
- * appropriate filters for the ICMPv6 socket to only receive echo replies.
+ * Open the raw IPv6 socket used for this test and configure
+ * appropriate filters for the SRv6 header and hoplimit.
  */
 static int open_sockets(struct socket_t *sockets) {
 
@@ -361,7 +369,7 @@ static int open_sockets(struct socket_t *sockets) {
     sockets->socket = -1; //does not use ipv4
 
     if ( (sockets->socket6 = socket(AF_INET6, SOCK_DGRAM, 0)) < 0 ) {
-        Log(LOG_WARNING, "Failed to open raw socket for ICMPv6");
+        Log(LOG_WARNING, "Failed to open raw socket for SRv6");
     } else {
         if ( setsockopt(sockets->socket6, IPPROTO_IPV6, IPV6_RECVRTHDR,
                 &on, sizeof(on)) < 0) {
@@ -373,16 +381,6 @@ static int open_sockets(struct socket_t *sockets) {
                 &on, sizeof(on)) < 0) {
             Log(LOG_WARNING, "Could not set IPV6_RECVHOPLIMIT");
         }
-
-
-        /* configure ICMPv6 filters to only pass through ICMPv6 echo reply */
-        // struct icmp6_filter filter;
-        // ICMP6_FILTER_SETBLOCKALL(&filter);
-        // ICMP6_FILTER_SETPASS(ICMP6_ECHO_REPLY, &filter);
-        // if ( setsockopt(sockets->socket6, SOL_ICMPV6, ICMP6_FILTER,
-        //         &filter, sizeof(struct icmp6_filter)) < 0 ) {
-        //     Log(LOG_WARNING, "Could not set ICMPv6 filter");
-        // }
     }
 
     /* make sure at least one type of socket was opened */
@@ -399,13 +397,13 @@ static int open_sockets(struct socket_t *sockets) {
  * Construct a protocol buffer message containing the results for a single
  * destination address.
  */
-static Amplet2__Icmp__Item* report_destination(struct info_t *info) {
+static Amplet2__Srv6__Item* report_destination(struct info_t *info) {
 
-    Amplet2__Icmp__Item *item =
-        (Amplet2__Icmp__Item*)malloc(sizeof(Amplet2__Icmp__Item));
+    Amplet2__Srv6__Item *item =
+        (Amplet2__Srv6__Item*)malloc(sizeof(Amplet2__Srv6__Item));
 
     /* fill the report item with results of a test */
-    amplet2__icmp__item__init(item);
+    amplet2__srv6__item__init(item);
     item->has_family = 1;
     item->family = ((struct sockaddr_in6* )info->addr)->sin6_family ;
     // if (info->srh) {
@@ -445,7 +443,7 @@ static Amplet2__Icmp__Item* report_destination(struct info_t *info) {
         item->has_err_code = 0;
     }
 
-    Log(LOG_DEBUG, "icmp result: %dus, %d/%d\n",
+    Log(LOG_DEBUG, "SRv6 connectivity result: %dus, %d/%d\n",
             item->has_rtt?(int)item->rtt:-1, item->err_type, item->err_code);
 
     return item;
@@ -463,12 +461,12 @@ static amp_test_result_t* report_results(struct timeval *start_time, int count,
     int i;
     amp_test_result_t *result = calloc(1, sizeof(amp_test_result_t));
 
-    Log(LOG_DEBUG, "Building icmp report, count:%d psize:%d rand:%d dscp:%0x\n",
+    Log(LOG_DEBUG, "Building SRv6 report, count:%d psize:%d rand:%d dscp:%0x\n",
             count, opt->packet_size, opt->random, opt->dscp);
 
-    Amplet2__Icmp__Report msg = AMPLET2__ICMP__REPORT__INIT;
-    Amplet2__Icmp__Header header = AMPLET2__ICMP__HEADER__INIT;
-    Amplet2__Icmp__Item **reports;
+    Amplet2__Srv6__Report msg = AMPLET2__SRV6__REPORT__INIT;
+    Amplet2__Srv6__Header header = AMPLET2__SRV6__HEADER__INIT;
+    Amplet2__Srv6__Item **reports;
 
     /* populate the header with all the test options */
     header.has_packet_size = 1;
@@ -479,7 +477,7 @@ static amp_test_result_t* report_results(struct timeval *start_time, int count,
     header.dscp = opt->dscp;
 
     /* build up the repeated reports section with each of the results */
-    reports = malloc(sizeof(Amplet2__Icmp__Item*) * count);
+    reports = malloc(sizeof(Amplet2__Srv6__Item*) * count);
     for ( i = 0; i < count; i++ ) {
         reports[i] = report_destination(&info[i]);
     }
@@ -491,9 +489,9 @@ static amp_test_result_t* report_results(struct timeval *start_time, int count,
 
     /* pack all the results into a buffer for transmitting */
     result->timestamp = (uint64_t)start_time->tv_sec;
-    result->len = amplet2__icmp__report__get_packed_size(&msg);
+    result->len = amplet2__srv6__report__get_packed_size(&msg);
     result->data = malloc(result->len);
-    amplet2__icmp__report__pack(&msg, result->data);
+    amplet2__srv6__report__pack(&msg, result->data);
 
     /* free up all the memory we had to allocate to report items */
     for ( i = 0; i < count; i++ ) {
@@ -603,22 +601,50 @@ static void parse_targetlist(char *address_string,
     struct addrinfo *res = NULL;
     struct info_t *curr_test = NULL;
     struct target_group_t *target = NULL;
+    nametable_t *namet = NULL;
     int target_index = 0;
 
     str = strtok(address_string, ",");
 
     while ( str ) { //while there are more tokens to parse
-        if ( (addr = get_numeric_address(str, NULL)) ) {
+        addr = get_numeric_address(str, NULL);
+
+        if ( addr == NULL ) {
+            //check if standalone or not
+            //no need to check nametable if we dont have one
+            if (1) {
+                namet = name_to_address(str);
+                if (namet){
+                    addr = ((nametable_t*)namet)->addr;
+                } else {
+                    Log(LOG_ERR, "%s target not in nametable", str);
+                    return;
+                }
+            } else {
+                Log(LOG_ERR, "%s target is invalid", str);
+                    return;
+            }
+        } else {
+            //if numeric address passes cannon name is just the ip str
             addr->ai_canonname = strdup(str);
-
-            //Shift new addr into the linked list of addrs
-            addr->ai_next = res;
-            res = addr;
-
-            str = strtok(NULL, ",");
-            continue;
         }
-        //TODO cleanup previous addrs
+
+
+        addr->ai_next = res;
+        res = addr;
+
+
+        char dst_address[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6,
+            &((struct sockaddr_in6*)addr->ai_addr)->sin6_addr,
+            dst_address, 
+            INET6_ADDRSTRLEN);
+
+        str = strtok(NULL, ",");
+
+
+        continue;
+
         return;
     }
     //addr is now the head of a list of hops in reverse order
@@ -665,6 +691,12 @@ static void parse_targetlist(char *address_string,
             target->addr = addr;
             target->num_tests = 0;
             target->tests = NULL;
+            target->name = malloc(INET6_ADDRSTRLEN);
+            inet_ntop(
+                    AF_INET6, 
+                    &((struct sockaddr_in6*)addr->ai_addr)->sin6_addr, 
+                    target->name, 
+                    INET6_ADDRSTRLEN);
         }
     }
 
@@ -689,10 +721,9 @@ static void parse_targetlist(char *address_string,
         //for a local address, addr will be NULL so need to check for this
         curr_test->addr = &((struct sockaddr_in6*)target->addr->ai_addr)
                 ->sin6_addr;
-        printf("adding global test %d\n", globals->shared.info_count);
-        
+        //Log(LOG_INFO, "Adding global test %d", globals->shared.info_count);
     } else {
-        printf("adding local test %d\n", globals->shared.info_count);
+        //Log(LOG_INFO, "Adding local test %d", globals->shared.info_count);
     }
 
     curr_test->magic.magic = rand();
@@ -706,11 +737,11 @@ static void parse_targetlist(char *address_string,
 
 
 
-static Amplet2__Icmp__Probe *build_probe_payloads(struct info_t * test) {
+static Amplet2__Srv6__Probe *build_probe_payloads(struct info_t * test) {
     
-    Amplet2__Icmp__Probe *probe = malloc(sizeof(Amplet2__Icmp__Probe));
+    Amplet2__Srv6__Probe *probe = malloc(sizeof(Amplet2__Srv6__Probe));
     
-    amplet2__icmp__probe__init(probe);
+    amplet2__srv6__probe__init(probe);
 
     probe->magic = test->magic.magic;
     probe->has_magic = 1;
@@ -729,8 +760,8 @@ static Amplet2__Icmp__Probe *build_probe_payloads(struct info_t * test) {
 static ProtobufCBinaryData* build_hello(struct opt_t *options, 
         struct target_group_t *target, struct icmpglobals_t *globals) {
     ProtobufCBinaryData *data = malloc(sizeof(ProtobufCBinaryData));
-    Amplet2__Icmp__Hello hello = AMPLET2__ICMP__HELLO__INIT;
-    Amplet2__Icmp__Probe **probe_payloads = NULL;
+    Amplet2__Srv6__Hello hello = AMPLET2__SRV6__HELLO__INIT;
+    Amplet2__Srv6__Probe **probe_payloads = NULL;
 
     hello.random = (uint32_t)options->random;
     hello.has_random = 1;
@@ -747,11 +778,9 @@ static ProtobufCBinaryData* build_hello(struct opt_t *options,
 
     for ( i = 0; i < target->num_tests; i++ ) {
         probe_payloads = realloc(probe_payloads, 
-                sizeof(Amplet2__Icmp__Probe *) * (i+1));
+                sizeof(Amplet2__Srv6__Probe *) * (i+1));
         probe_payloads[i] = build_probe_payloads(
                 &globals->shared.info[target->tests[i]]);
-        printf("building hello: %d\n", 
-            globals->shared.info[target->tests[i]].magic.magic);
     }
 
     
@@ -761,11 +790,95 @@ static ProtobufCBinaryData* build_hello(struct opt_t *options,
     hello.n_probes = i;
 
 
-    data->len = amplet2__icmp__hello__get_packed_size(&hello);
+    data->len = amplet2__srv6__hello__get_packed_size(&hello);
     data->data = malloc(data->len);
-    amplet2__icmp__hello__pack(&hello, data->data);
+    amplet2__srv6__hello__pack(&hello, data->data);
 
     return data;
+}
+
+
+
+static int contact_targets(struct target_group_t *target,
+        struct icmpglobals_t *globals){
+
+    char dst_address[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6,
+        &((struct sockaddr_in6*)target->addr->ai_addr)->sin6_addr,
+        dst_address, 
+        INET6_ADDRSTRLEN);
+    Log(LOG_DEBUG, "Attempting to connect to: %s",dst_address);
+
+    if ( target->addr ){
+        struct sockopt_t sockopts = {};
+        //create new CTRL socket here 
+        //before we connect to control server we need to start it (maybe)
+        if ( (target->ctrl = connect_control_server(
+                    target->addr,
+                    atoi(DEFAULT_AMPLET_CONTROL_PORT),
+                    &sockopts)) 
+                    == NULL ) {
+            Log(LOG_WARNING,
+                    "Failed to connect control server on port %d",
+                    atoi(DEFAULT_AMPLET_CONTROL_PORT));
+            return 0;
+        }
+
+
+        /* start the server if required (connected to an amplet) */
+        //if ( ssl_ctx && target->name == NULL ) {//todo
+        {
+            Amplet2__Measured__Response response;
+
+            if ( start_remote_server(target->ctrl, AMP_TEST_SRV6, NULL) < 0 ) {
+                Log(LOG_WARNING, "Failed to start remote server");
+                return 0;
+            }
+
+            /* make sure the server was started properly */
+            if ( read_measured_response(target->ctrl, &response) < 0 ) {
+                Log(LOG_WARNING, "Failed to read server control response");
+                return 0;
+            }
+
+            /* TODO return something useful if this was remotely triggered? */
+            if ( response.code != MEASURED_CONTROL_OK ) {
+                Log(LOG_WARNING, "Failed to start server: %d %s", response.code,
+                        response.message);
+                return 0;
+            }
+        }
+
+        /* start the server if required (connected to an amplet) */
+        if ( send_control_hello(
+                    AMP_TEST_SRV6,
+                    target->ctrl,
+                    build_hello(
+                        &globals->options, 
+                        target, 
+                        globals)
+                    ) < 0 ) {
+            Log(LOG_WARNING, "Failed to send HELLO packet, aborting");
+            return 0;
+        }
+
+        if ( read_control_ready(AMP_TEST_THROUGHPUT, 
+                    target->ctrl,
+                    &(target->port)) < 0 ) {
+            Log(LOG_WARNING, "Failed to read READY packet, aborting");
+            return 0;
+        }
+
+        Log(LOG_DEBUG, "Read ready packet port:%d", 
+                target->port);
+
+        ((struct sockaddr_in6 *)target->addr->ai_addr)
+                ->sin6_port = htons(target->port);
+
+        return 1;
+    }
+    Log(LOG_ERR, "Target has no address, aborting");
+    return 0;
 }
 
 
@@ -866,12 +979,16 @@ amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
         exit(EXIT_FAILURE);
     }
 
-        if (globals->self_target.num_tests && !sourcev6) {
+    if (globals->self_target.num_tests && !sourcev6) {
         Log(LOG_WARNING, 
                 "-B was provided but no local v6 address is set"
                 " with -6 exiting");
         exit(EXIT_FAILURE);
+    }
 
+    if (globals->shared.info_count == 0) {
+        Log(LOG_WARNING, "No valid tests were provided, aborting");
+        exit(EXIT_FAILURE);
     }
 
     /* pick a random packet size within allowable boundaries */
@@ -908,26 +1025,6 @@ amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
         exit(EXIT_FAILURE);
     }
 
-    // const char * destination_address = "fc00:0:19::1"; //r2 //needs to be valid dest
-    // struct sockaddr_in6 Addr = { 0 };
-    // inet_pton(AF_INET6, destination_address, &( ( struct sockaddr_in6 * ) &Addr)->sin6_addr);
-    // Addr.sin6_family = AF_INET6;
-    // Addr.sin6_port = htons( 9 ); //9 is discard port
-
-    // int Handle = socket(AF_INET6, SOCK_DGRAM, 0);
-    // socklen_t AddrLen = sizeof(Addr);
-    // connect( Handle, (struct sockaddr*)&Addr, AddrLen);
-    // getsockname(Handle, (struct sockaddr*)&Addr, &AddrLen);
-    // close (Handle);
-
-    // char source_address[INET6_ADDRSTRLEN];
-    // struct sockaddr_in6 Addr = { 0 };
-    // getsockname(Handle, (struct sockaddr*)&Addr, &AddrLen);
-    // if ( inet_ntop(AF_INET6, &(Addr.sin6_addr), source_address, INET6_ADDRSTRLEN) == NULL) {
-    //     perror("inet_ntop");
-    //     exit(EXIT_FAILURE);
-    // }
-
     if ( device && bind_sockets_to_device(&globals->sockets, device) < 0 ) {
         Log(LOG_ERR, "Unable to bind raw UDP socket to device, aborting test");
         exit(EXIT_FAILURE);
@@ -955,75 +1052,34 @@ amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
     globals->self_target.addr->ai_addr = (struct sockaddr*)&sin;
     globals->self_target.addr->ai_addrlen = sizeof(struct sockaddr);
     globals->self_target.addr->ai_family = AF_INET6;
-    //assign used addres/port to self_target 
+
     
 
     char source_address[INET6_ADDRSTRLEN];
-
     if ( inet_ntop(AF_INET6, &(sin.sin6_addr), source_address, INET6_ADDRSTRLEN) == NULL) {
         perror("inet_ntop");
         exit(EXIT_FAILURE);
     }
-    printf("Bound to %s:%d\n",source_address, ntohs(sin.sin6_port));
+    Log(LOG_DEBUG, "Bound to %s:%d\n",source_address, ntohs(sin.sin6_port));
+    Log(LOG_DEBUG, "Registered %d local test(s)", globals->self_target.num_tests);
+    Log(LOG_DEBUG, "Registered %d remote(s) with %d test(s) total",
+            globals->target_count,
+            globals->shared.info_count);
 
-    //get_numeric_address();
 
-    printf("there is %d local test(s)\n", globals->self_target.num_tests);
+    for (int i = 0; i< globals->target_count; i++){
 
-    // globals->self_target.addr = sourcev6;
+        if ( contact_targets(&globals->targets[i], globals) != 0 ){
+            globals->targets[i].state = AMP_SRV6_TARGET_STATE_POST_CONNECTION;
+        } else {
+            Log(LOG_ERR, "Failed to connect and start to remote server");
+            globals->targets[i].state = AMP_SRV6_TARGET_STATE_FAILED_CONNECT;
+        }
 
-    for (int i  = 0; i< globals->target_count; i++){
-        char dst_address[INET6_ADDRSTRLEN];
-        inet_ntop(AF_INET6,
-            &((struct sockaddr_in6*)globals->targets[i].addr->ai_addr)->sin6_addr,
-            dst_address, 
-            INET6_ADDRSTRLEN);
-        printf("Unique endpoint:%s, \ttests:%d\n",dst_address, globals->targets[i].num_tests);
-        //could setup CTRL socket per uniuqe endpoint here?
-
-        //need a way to check if ip resolves to local address
-        //assume for now nothing does
-        if (globals->targets[i].addr ){
-            struct sockopt_t sockopts = {};
-            //create new CTRL socket here 
-            if ( (globals->targets[i].ctrl = connect_control_server(
-                        globals->targets[i].addr, DEFAULT_CONTROL_PORT, &sockopts)) 
-                        == NULL ) {
-                Log(LOG_WARNING, "Failed to connect control server on port %d", DEFAULT_CONTROL_PORT);
-            }
-            /* start the server if required (connected to an amplet) */
-            if ( send_control_hello(
-                        AMP_TEST_SRV6,
-                        globals->targets[i].ctrl,
-                        build_hello(
-                            &globals->options, 
-                            &globals->targets[i], 
-                            globals)
-                        ) < 0 ) {
-                Log(LOG_WARNING, "Failed to send HELLO packet, aborting");
-            }
-
-            if ( read_control_ready(AMP_TEST_THROUGHPUT, 
-                        globals->targets[i].ctrl,
-                        &(globals->targets[i].port)) < 0 ) {
-                Log(LOG_WARNING, "Failed to read READY packet, aborting");
-            }
-
-            Log(LOG_WARNING, "Read ready packet port:%d", 
-                    globals->targets[i].port);
-
-            ((struct sockaddr_in6 *)globals->targets[i].addr->ai_addr)
-                    ->sin6_port = htons(globals->targets[i].port);
-        } 
     }
-    //local tests dont need a ctrl socket
-    //they do need an UDP port tho
-    //globals->self_target.port = htons(globals->self.sin6_port);
-    globals->self.sin6_port = htons(globals->self.sin6_port);
 
 
-    //check if num local tests > 0
-
+    //globals->self.sin6_port = htons(globals->self.sin6_port);
 
 
     globals->icmp_sock = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
@@ -1068,6 +1124,8 @@ amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
             EV_READ|EV_PERSIST, receive_icmp_callback, globals);
     event_add(icmp_socket, NULL);
 
+    //TODO add event for recieving results
+
     /* schedule the first probe packet to be sent immediately */
     globals->nextpackettimer = event_new(globals->shared.base, -1,
             EV_PERSIST, send_packet, globals);
@@ -1110,32 +1168,35 @@ amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
     if ( sourcev6 ) {
         freeaddrinfo(sourcev6);
     }
+
     //TODO this needs to be put into the event loop too
     //recieve results from targets
     for (int i  = 0; i< globals->target_count; i++){
         struct target_group_t *curr_target = &globals->targets[i];
-        ProtobufCBinaryData data;
-        if ( read_control_result(
-                AMP_TEST_SRV6,
-                curr_target->ctrl,
-                &data) < 0 ) {
-            Log(LOG_WARNING, "Failed to read RESULT packet, aborting");
-            continue;
-        }
-        Amplet2__Icmp__Goodbye *goodbye = amplet2__icmp__goodbye__unpack(
-                NULL,
-                data.len, 
-                data.data);
+        if ( curr_target->state == AMP_SRV6_TARGET_STATE_FAILED_CONNECT ) {
 
-        //struct info_t *curr_info = curr_target->tests[goodbye->results
-        for (int j = 0; j < curr_target->num_tests; j++){
-            struct info_t *curr_info = &(globals->shared.info[curr_target->tests[j]]);
-            //goodbye->results[j]->ttl
-            curr_info->ttl = goodbye->results[j]->ttl;
-            printf("TTL:%d\n",curr_info->ttl);
-        }
+        } else {
+            ProtobufCBinaryData data;
+            if ( read_control_result(
+                    AMP_TEST_SRV6,
+                    curr_target->ctrl,
+                    &data) < 0 ) {
+                Log(LOG_WARNING, "Failed to read RESULT packet, aborting");
+                continue;
+            }
+            Amplet2__Srv6__Goodbye *goodbye = amplet2__srv6__goodbye__unpack(
+                    NULL,
+                    data.len, 
+                    data.data);
 
-        amplet2__icmp__goodbye__free_unpacked(goodbye, NULL);
+            //struct info_t *curr_info = curr_target->tests[goodbye->results
+            for (int j = 0; j < curr_target->num_tests; j++){
+                struct info_t *curr_info = &(globals->shared.info[curr_target->tests[j]]);
+                //goodbye->results[j]->ttl
+                curr_info->ttl = goodbye->results[j]->ttl;
+            }
+            amplet2__srv6__goodbye__free_unpacked(goodbye, NULL);
+        }
     }
 
     /* send report */

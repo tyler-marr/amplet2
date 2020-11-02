@@ -722,8 +722,6 @@ int delay_send_packet(int sock, char *packet, int size, struct addrinfo *dest,
 
     bytes_sent = sendto(sock, packet, size, 0, dest->ai_addr, dest->ai_addrlen);
 
-    Log(LOG_DEBUG,"sendto error: %d %s",errno, strerror(errno));
-
 #ifdef HAVE_SOF_TIMESTAMPING_OPT_ID
     /* get timestamp if TIMESTAMPING is available and we know the packet id */
     if ( sock < MAX_TX_TIMESTAMP_FD ) {

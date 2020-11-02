@@ -123,18 +123,28 @@ struct info_t {
     struct magic_seq magic;
 };
 
+enum target_state_t {
+    AMP_SRV6_TARGET_STATE_PRE_LOCAL, 
+    AMP_SRV6_TARGET_STATE_PRE_CONNECTION,
+    AMP_SRV6_TARGET_STATE_FAILED_CONNECT,
+    AMP_SRV6_TARGET_STATE_POST_CONNECTION,
+    AMP_SRV6_TARGET_STATE_TESTS_SENT,
+    AMP_SRV6_TARGET_STATE_RESUTLS
+};
+
 struct target_group_t {
     //struct in6_addr *addr; //endpoints addrs, 
     struct addrinfo *addr;
+    char *name;
     int is_local;
-    //could change this to a sock_addr to include the port number
+    
+    int *tests;             //array of indexes into global test store
+    int num_tests;          //number of tests
 
+    uint16_t port;          //port that remote is listening on
+    BIO* ctrl;              //control socket to remote target
 
-    //each index in globals->info that contains this targets test
-    int *tests;
-    int num_tests;              //number of tests
-    uint16_t port;
-    BIO* ctrl;
+    enum target_state_t state;
 };
 
 
@@ -197,7 +207,7 @@ void print_srv6(amp_test_result_t *result);
 test_t *register_test(void);
 amp_test_result_t* run_srv6_client(int argc, char *argv[], int count,
         struct addrinfo **dests);
-amp_test_result_t* run_srv6_server(int argc, char *argv[], BIO *ctrl);
+void run_srv6_server(int argc, char *argv[], BIO *ctrl);
 void receive_probe_callback(evutil_socket_t evsock,
         short flags, void *evdata);
 void interrupt_test(

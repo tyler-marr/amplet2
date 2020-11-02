@@ -131,12 +131,6 @@ void receive_probe_callback(evutil_socket_t evsock,
         return;
     }
 
-    printf("MAGIC MATCH, was [%d]%04d found %04d\n", 
-                global_index,
-                curr_test->magic.magic, 
-                magic
-                );
-
     if ( srh ) {
 
         curr_test->srh = malloc(
@@ -220,7 +214,7 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
 
     /* this option string needs to be kept up to date with server and client */
     while ( (opt = getopt_long(argc, argv,
-                    "c:d:i:Nm:o:p:P:rsS:t:u:z:I:Q:Z:4::6::hvx",
+                    "c:d:i:Nm:o:p:P:B:rsS:t:u:z:I:Q:Z:4::6::hvx",
                     long_options, NULL)) != -1 ) {
         switch ( opt ) {
             case 's': server_flag_index = optind - 1; break;
@@ -248,8 +242,8 @@ amp_test_result_t* run_srv6(int argc, char *argv[], int count,
  * Print icmp test results to stdout, nicely formatted for the standalone test
  */
 void print_srv6(amp_test_result_t *result) {
-    Amplet2__Icmp__Report *msg;
-    Amplet2__Icmp__Item *item;
+    Amplet2__Srv6__Report *msg;
+    Amplet2__Srv6__Item *item;
     unsigned int i;
     char addrstr[INET6_ADDRSTRLEN];
 
@@ -257,7 +251,7 @@ void print_srv6(amp_test_result_t *result) {
     assert(result->data);
 
     /* unpack all the data */
-    msg = amplet2__icmp__report__unpack(NULL, result->len, result->data);
+    msg = amplet2__srv6__report__unpack(NULL, result->len, result->data);
 
     assert(msg);
     assert(msg->header);
@@ -311,7 +305,7 @@ void print_srv6(amp_test_result_t *result) {
     }
     printf("\n");
 
-    amplet2__icmp__report__free_unpacked(msg, NULL);
+    amplet2__srv6__report__free_unpacked(msg, NULL);
 }
 
 
@@ -323,16 +317,16 @@ test_t *register_test() {
     test_t *new_test = (test_t *)malloc(sizeof(test_t));
 
     /* the test id is defined by the enum in tests.h */
-    new_test->id = AMP_TEST_ICMP;
+    new_test->id = AMP_TEST_SRV6;
 
     /* name is used to schedule the test and report results */
-    new_test->name = strdup("icmp");
+    new_test->name = strdup("srv6");
 
     /* how many targets a single instance of this test can have */
     new_test->max_targets = 0;
 
     /* minimum number of targets required to run this test */
-    new_test->min_targets = 1;
+    new_test->min_targets = 0;
 
     /* maximum duration this test should take before being killed */
     new_test->max_duration = 120;
@@ -344,7 +338,7 @@ test_t *register_test() {
     new_test->print_callback = print_srv6;
 
     /* the icmp test doesn't require us to run a custom server */
-    new_test->server_callback = NULL;
+    new_test->server_callback = run_srv6_server;
 
     /* don't give the icmp test a SIGINT warning, it should not take long! */
     new_test->sigint = 0;
